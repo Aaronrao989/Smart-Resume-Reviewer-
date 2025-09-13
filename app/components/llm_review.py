@@ -14,6 +14,14 @@ def choose_backend():
     name = os.getenv("MODEL_NAME", "llama-3.1-8b-instant")  
     return backend, name
 
+def get_backend_info():
+    """Get the current backend configuration"""
+    try:
+        # You can modify this based on your actual backend configuration
+        return "openai", "GPT-3.5"  # or whatever backend you're using
+    except Exception:
+        return "dummy", "None"
+
 # -----------------------------
 # Build prompt
 # -----------------------------
@@ -50,26 +58,43 @@ def call_llm(prompt: str, system: Optional[str] = None) -> str:
     backend, model = choose_backend()
 
     if backend == "groq":
-        from groq import Groq   # ✅ import Groq SDK
+        try:
+            from groq import Groq
+            
+            # Try multiple ways to get API key
+            api_key = (
+                os.getenv("GROQ_API_KEY") or 
+                os.environ.get("GROQ_API_KEY") or 
+                load_env().get("GROQ_API_KEY")
+            )
+            
+            if not api_key:
+                raise ValueError("""
+                GROQ_API_KEY not found. Please set it using one of these methods:
+                1. Export in terminal: export GROQ_API_KEY='your-key'
+                2. Add to .env file: GROQ_API_KEY=your-key
+                3. Set environment variable in your system
+                """)
 
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            raise RuntimeError("GROQ_API_KEY not set. Please export your API key.")
+            client = Groq(api_key=api_key)
+            
+            msgs = []
+            if system:
+                msgs.append({"role": "system", "content": system})
+            msgs.append({"role": "user", "content": prompt})
 
-        client = Groq(api_key=api_key)
-
-        msgs = []
-        if system:
-            msgs.append({"role": "system", "content": system})
-        msgs.append({"role": "user", "content": prompt})
-
-        resp = client.chat.completions.create(
-            model=model,              # ✅ e.g. llama-3.1-8b-instant
-            messages=msgs,
-            temperature=0.2,
-            max_tokens=800,
-        )
-        return resp.choices[0].message.content.strip()
+            resp = client.chat.completions.create(
+                model=model,
+                messages=msgs,
+                temperature=0.2,
+                max_tokens=800,
+            )
+            return resp.choices[0].message.content.strip()
+            
+        except ImportError:
+            raise RuntimeError("Please install groq: pip install groq")
+        except Exception as e:
+            raise RuntimeError(f"Groq API error: {str(e)}")
 
     else:
         raise RuntimeError(f"Unsupported backend: {backend}")
