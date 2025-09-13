@@ -1,148 +1,274 @@
-# app.py (with response length cap notice)
 import sys
 from pathlib import Path
 import os
 import json
 import streamlit as st
+from fpdf import FPDF
+import time
+import numpy as np
 
-# -----------------------------
-# Project paths & sys.path fixes
-# -----------------------------
+from components.llm_review import get_backend_info
+
 ROOT = Path(__file__).parent.resolve()
-POSSIBLE_COMPONENT_DIRS = [
-    ROOT / "components",
-    ROOT / "app" / "components",
-    ROOT.parent / "app" / "components",
-    ROOT.parent / "components",
-]
-for p in POSSIBLE_COMPONENT_DIRS:
-    if p.exists() and p.is_dir():
-        sys.path.insert(0, str(p.parent))
-        sys.path.insert(0, str(p))
 
-# -----------------------------
-# ARTIFACT location discovery
-# -----------------------------
-try:
-    from components.jd_index import ART_DIR as COMPONENTS_ART_DIR  # type: ignore
-    ART_DIR = Path(COMPONENTS_ART_DIR)
-except Exception:
-    ART_DIR = (ROOT / "artifacts")
-ART_DIR = ART_DIR.resolve()
+# ✅ Force components dir into path
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "components"))
+
+# ✅ Force artifacts inside app/artifacts
+ART_DIR = ROOT / "artifacts"
 ART_DIR.mkdir(parents=True, exist_ok=True)
 
 def load_json_safe(path, default=None):
     try:
         with open(path, "r", encoding="utf-8") as fh:
             return json.load(fh)
-    except FileNotFoundError:
-        return default
     except Exception:
         return default
 
-# -----------------------------
-# Streamlit UI
-# -----------------------------
-st.set_page_config(page_title="🔎 Resume Reviewer (safe start)", layout="wide")
-st.title("🔎 LLM-Powered Resume Reviewer (safe startup)")
-st.caption("This app lazy-loads heavy components to avoid startup crashes. Upload a resume or paste text and review.")
+# Modify the load_roles function to be quieter
+def load_roles():
+    """Load roles from multiple possible sources"""
+    roles = []
+    try:
+        metadata = load_json_safe(ART_DIR / "model_metadata.json")
+        if metadata and "roles" in metadata:
+            roles = sorted(metadata["roles"])
+            return roles
+    except Exception:
+        pass
+    
+    try:
+        y_path = ART_DIR / "y_positions.npy"
+        if y_path.exists():
+            y_positions = np.load(y_path, allow_pickle=True)
+            roles = sorted(set(y_positions.tolist()))
+            return roles
+    except Exception:
+        pass
+    
+    try:
+        from components.jd_index import JDIndex
+        jd = JDIndex()
+        jd.load()
+        if hasattr(jd, "classes_") and jd.classes_ is not None:
+            roles = sorted(set(jd.classes_.tolist()))
+            return roles
+    except Exception:
+        pass
+    
+    return roles
 
-# Sidebar: show artifact info
-st.sidebar.header("Artifacts & Role KB")
-meta = load_json_safe(os.path.join(ART_DIR, "faiss_meta.json"), default=[])
-roles = sorted({m.get("job_position", "Unknown") for m in meta}) if meta else []
-if roles:
-    st.sidebar.success(f"Knowledge base loaded: {len(roles)} roles")
-else:
-    st.sidebar.warning("Knowledge base empty or missing. Run training notebook to generate artifacts/ first.")
+def create_pdf_report(ats_score, ats_details, llm_feedback, job_role):
+    pdf = FPDF()
+    pdf.add_page()
+    
+    # Header
+    pdf.set_font('Arial', 'B', 16)
+    pdf.cell(0, 10, 'Resume Analysis Report', 0, 1, 'C')
+    pdf.line(10, 30, 200, 30)
+    
+    # Job Role
+    pdf.set_font('Arial', 'B', 12)
+    pdf.cell(0, 10, f'Position: {job_role}', 0, 1)
+    
+    # ATS Score
+    pdf.set_font('Arial', 'B', 14)
+    pdf.cell(0, 10, f'ATS Score: {ats_score}/100', 0, 1)
+    
+    # ATS Details
+    pdf.set_font('Arial', 'B', 12)
+    pdf.cell(0, 10, 'ATS Analysis:', 0, 1)
+    pdf.set_font('Arial', '', 10)
+    for key, value in ats_details.items():
+        pdf.multi_cell(0, 10, f'{key}: {value}')
+    
+    # LLM Feedback
+    pdf.add_page()
+    pdf.set_font('Arial', 'B', 12)
+    pdf.cell(0, 10, 'LLM Feedback:', 0, 1)
+    pdf.set_font('Arial', '', 10)
+    pdf.multi_cell(0, 10, llm_feedback)
+    
+    return pdf
 
-# -----------------------------
-# Show backend mode banner
-# -----------------------------
-from components.llm_review import choose_backend  # import only the light function
-backend, model_name = choose_backend()
-if backend == "dummy":
-    st.sidebar.warning("⚠️ Running in **DUMMY MODE** — no real LLM calls, mock JSON returned.")
-else:
-    st.sidebar.info(f"Backend: **{backend}** | Model: **{model_name}**")
+# Update the main UI
+st.set_page_config(page_title="🎯 Smart Resume Reviewer", layout="wide")
 
-# 🔒 Always show token cap notice
-st.sidebar.markdown("---")
-st.sidebar.warning("⚠️ LLM response length capped at **800 tokens** to prevent crashes.")
+# Custom CSS
+st.markdown("""
+    <style>
+    .main {
+        background-color: #f5f5f5;
+    }
+    .stButton>button {
+        background-color: #4CAF50;
+        color: white;
+        border-radius: 20px;
+    }
+    .css-1d391kg {
+        padding: 2rem 1rem;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-# -----------------------------
-# Inputs
-# -----------------------------
-colA, colB = st.columns(2)
-with colA:
-    job_role = st.selectbox("Target Job Role", options=roles if roles else ["(Run training first)"])
-    jd_text = st.text_area("Paste Job Description (optional)", height=160, placeholder="Paste JD here...")
+# Header with animation
+st.markdown("""
+    <div style='text-align: center; padding: 20px;'>
+        <h1 style='color: #2E4053;'>🎯 Smart Resume Reviewer</h1>
+        <p style='color: #566573;'>Powered by AI - Get instant feedback on your resume</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-with colB:
-    up = st.file_uploader("Upload Resume (PDF)", type=["pdf"], accept_multiple_files=False)
-    resume_text = st.text_area("...or Paste Resume Text", height=220, placeholder="Paste resume here if not uploading PDF...")
+# Add this line after ART_DIR initialization and before the UI code
+roles = load_roles()  # Initialize roles list
 
-# PDF handling
+# Main content in tabs
+tab1, tab2 = st.tabs(["📝 Resume Analysis", "ℹ️ How it Works"])
+
+with tab1:
+    colA, colB = st.columns(2)
+    
+    with colA:
+        st.markdown("### 📋 Job Details")
+        available_roles = roles if roles else ["(Run training first)"]
+        job_role = st.selectbox(
+            "Select Target Position", 
+            options=available_roles
+        )
+        jd_text = st.text_area("Job Description (optional)", height=160, 
+                              placeholder="Enhance your analysis by pasting the job description...")
+
+    with colB:
+        st.markdown("### 📎 Resume Upload")
+        up = st.file_uploader("Upload Resume (PDF)", type=["pdf"])
+        resume_text = st.text_area("or Paste Resume Text", height=220,
+                                 placeholder="Copy and paste your resume content here...")
+
 if up is not None:
     tmp_path = os.path.join("/tmp", up.name)
     with open(tmp_path, "wb") as f:
         f.write(up.read())
-    try:
-        from components.resume_parser import extract_text_from_pdf  # type: ignore
-    except Exception as e:
-        st.error("Could not import resume extractor. Check components/resume_parser.py and PyMuPDF installation.")
-        st.exception(e)
+    from components.resume_parser import extract_text_from_pdf
+    text, pages = extract_text_from_pdf(tmp_path)
+    if text:
+        resume_text = text
+        st.success(f"Extracted text from PDF ({pages} pages).")
     else:
-        text, pages = extract_text_from_pdf(tmp_path)
-        if text:
-            resume_text = text
-            st.success(f"Extracted text from PDF ({pages} pages). You can still edit below.")
-        else:
-            st.error("Could not extract text from PDF. Paste your resume text instead.")
+        st.error("Could not extract text from PDF. Paste manually.")
 
 st.divider()
 
-# -----------------------------
-# Review Button
-# -----------------------------
-if st.button("Review", type="primary"):
+# Add this function after the load_json_safe function
+def load_faiss_metadata():
+    """Load role metadata from faiss_meta.json"""
+    meta_path = ART_DIR / "faiss_meta.json"
+    return load_json_safe(meta_path, default=[])
+
+# Add this line after the backend selection and before the colA, colB = st.columns(2)
+meta = load_faiss_metadata()
+
+# Replace the review button section with this:
+if st.button("🚀 Analyze Resume", type="primary"):
     if not roles:
-        st.error("Artifacts not found. Please run the training notebook first (creates artifacts/faiss_meta.json etc.).")
+        st.error("⚠️ System not ready. Please contact support.")
     elif not (resume_text and resume_text.strip()):
-        st.error("Provide resume text (upload or paste).")
+        st.warning("📄 Please provide your resume content.")
     else:
-        guidance_blobs, required_skills = [], []
-        for m in meta:
-            if m.get("job_position") == job_role:
-                guidance_blobs.append(m.get("text", ""))
-                if isinstance(m.get("skills"), list):
-                    required_skills.extend(m.get("skills"))
+        with st.spinner("🔄 Analyzing your resume..."):
+            guidance_blobs, required_skills = [], []
+            
+            # Try to get guidance from faiss metadata
+            meta_found = False
+            if meta and isinstance(meta, (list, dict)):
+                if isinstance(meta, dict):
+                    meta = [meta]  # Convert single dict to list
+                for m in meta:
+                    if m.get("job_position") == job_role:
+                        meta_found = True
+                        guidance_blobs.append(m.get("text", ""))
+                        if isinstance(m.get("skills"), list):
+                            required_skills.extend(m.get("skills"))
+            
+            # Fallback to JDIndex if no metadata found
+            if not meta_found:
+                from components.jd_index import JDIndex
+                jd = JDIndex()
+                jd.load()
+                guidance_blobs.append(f"Guidance for {job_role} based on classifier knowledge.")
 
-        with st.spinner("Running review (LLM + ATS)..."):
-            try:
-                from components.llm_review import review_resume  # type: ignore
-                resp = review_resume(
-                    resume_text=resume_text,
-                    job_role=job_role,
-                    jd_text=jd_text,
-                    guidance_blobs=guidance_blobs,
-                    required_skills=required_skills,
+            from components.llm_review import review_resume
+            resp = review_resume(
+                resume_text=resume_text,
+                job_role=job_role,
+                jd_text=jd_text,
+                guidance_blobs=guidance_blobs,
+                required_skills=required_skills,
+            )
+
+            ats = resp.get("ats", {})
+            st.subheader("ATS Score")
+            if ats:
+                st.metric("Overall", f"{ats.get('score', 0.0):.1f}/100")
+                st.json(ats.get("detail", {}), expanded=False)
+
+            st.subheader("LLM Feedback (raw)")
+            st.code(resp.get("llm_feedback_raw", "[No LLM output]"), language="json")
+            
+            # Display results in expanders
+            with st.expander("📊 ATS Score Analysis", expanded=True):
+                col1, col2, col3 = st.columns([1,2,1])
+                with col2:
+                    st.metric("Match Score", f"{ats.get('score', 0.0):.1f}/100")
+                st.json(ats.get("detail", {}))
+            
+            with st.expander("💡 AI Feedback", expanded=True):
+                st.markdown(resp.get("llm_feedback_raw", "No feedback available"))
+            
+            # Generate and offer PDF download
+            pdf = create_pdf_report(
+                ats_score=ats.get('score', 0.0),
+                ats_details=ats.get('detail', {}),
+                llm_feedback=resp.get('llm_feedback_raw', ''),
+                job_role=job_role
+            )
+            
+            pdf_file = "resume_analysis.pdf"
+            pdf.output(pdf_file)
+            
+            with open(pdf_file, "rb") as f:
+                st.download_button(
+                    label="📥 Download Analysis Report",
+                    data=f,
+                    file_name="resume_analysis.pdf",
+                    mime="application/pdf"
                 )
-            except Exception as e:
-                st.error("Error while running review. If this calls a cloud LLM, ensure your API key is set in the environment.")
-                st.exception(e)
-            else:
-                ats = resp.get("ats", {})
-                st.subheader("ATS Score")
-                if ats:
-                    score = ats.get("score", 0.0)
-                    st.metric("Overall", f"{score:.1f}/100")
-                    st.json(ats.get("detail", {}), expanded=False)
-                else:
-                    st.info("No ATS scoring returned.")
 
-                st.subheader("LLM Feedback (raw)")
-                st.code(resp.get("llm_feedback_raw", "[No LLM output]"), language="json")
+with tab2:
+    st.markdown("""
+    ### How to Get the Best Results
+    1. **Upload your resume** in PDF format or paste the text
+    2. **Select the target position** from our comprehensive database
+    3. **Paste the job description** (optional but recommended)
+    4. Click **Analyze Resume** to get instant feedback
+    
+    ### What You Get
+    - **ATS Compatibility Score**
+    - **Detailed Skills Analysis**
+    - **AI-Powered Recommendations**
+    - **Downloadable PDF Report**
+    """)
 
-st.sidebar.markdown("---")
-st.sidebar.info("Tip: if LLM calls fail, set `MODEL_BACKEND` or API keys in your environment (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.).")
+# Access secrets securely
+api_key = st.secrets["OPENAI_API_KEY"]
+model_backend = st.secrets.get("MODEL_BACKEND", "dummy")
+
+# Get backend info
+backend, model_name = get_backend_info()
+
+# Remove debug button and clean up sidebar
+st.sidebar.markdown("### System Status")
+if backend and backend != "dummy":
+    st.sidebar.success(f"🟢 Using {model_name}")
+else:
+    st.sidebar.warning("⚠️ Using Dummy Backend")
